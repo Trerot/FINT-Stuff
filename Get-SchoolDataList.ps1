@@ -46,7 +46,7 @@ $headers = @{
     .Notes
         FunctionName : Get-SchoolDataList
         Created by   : david.heim@mrfylke.no
-        Date         : 04/10/2022 13:43
+        Date         : 2022-10-04
         GitHub       : https://github.com/Trerot
 
         Feel free to ask about stuff.
