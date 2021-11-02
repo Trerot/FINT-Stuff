@@ -8,104 +8,130 @@
     all schools and the amount of students.
     .DESCRIPTION
     does 8 larger API requests. then localy matches instead of doing a gazillon api requests which would take a long time.
-    In order for this to work you should have an oathtoken on hand stored in $accesstoken which in turn is stored in $headers like so
+    splitt into two functions
+    Get-FintToken
+    this function when run fills in $global:headers with an oauth token for use with api requests later on.
+    You should fill inn creds on line 45-50
 
-$AccessToken = "Paste in oath token here"
-$headers = @{
-Authorization = "Bearer $AccessToken"
-}
-       
-    Example to fill in $headers with powershell using Curl (https://curl.se/windows/)
-
-$CurlCommand = @"
-curl -s https://idp.felleskomponent.no/nidp/oauth/nam/token ``
--u "somestring-off-text-with-stuff:longeruninterupetstringoftext" ``
--d grant_type=password ``
--d username="davidheim@client.mrfylke.no" ``
--d password="shouldhaveyourpasswordhere" ``
--d scope="fint-client"
-"@
-
-$Token = Invoke-Expression $CurlCommand | ConvertFrom-Json
-$AccessToken = $Token.access_token
-$headers = @{
-    Authorization = "Bearer $AccessToken"
-}
+    Running Get-SchoolDataList does the stuff. 
 
     Data is stored in the following files once its done processing data
-    "C:\UndervisningsgruppeXElev.csv"
-    "C:\skole.csv"
-    "C:\laerer.csv"
-    "C:\Skoledataliste.xlsx"
+    "$path\UndervisningsgruppeXElev.csv"
+    "$path\skole.csv"
+    "$path\laerer.csv"
+    "$path\Skoledataliste.xlsx"
+
+    Default path is documents folder for the user in the powershell session.
+    for another path, run "Get-SchoolDataList -path 'C:\Program Files\examplePath'" instead.
 
     the excel file contains the same info as the csv files split into each its own tab.
 
     .EXAMPLE
+        Stores info in $home\documents
     Get-SchoolDataList
+
+        For another path than $home\documents run
+    Get-SchoolDataList -path 'C:\Program Files\examplePath'
 
     .Notes
         FunctionName : Get-SchoolDataList
         Created by   : david.heim@mrfylke.no
-        Date         : 2022-10-04
+        Date         : 2022-11-02
         GitHub       : https://github.com/Trerot
 
         Feel free to ask about stuff.
 #>
-function Get-SchoolDataList {
+function Get-FintToken {
+    param (
+        [switch]$Force
+    )
     begin {
-        if ($headers -eq $null) {
-            $string = @'
-$headers is empty!
-you need to have an oauth token in $headers for this to run
-I couldn't get oauth token through powershell only so you have to install curl for windows(if its not allready installed) for this to work 
-https://curl.se/windows/.  
-you could also just do $accesstoken = "paste inn your token here"
-then remove all the other stuff apart from the $headers part.
-
-   Example to fill in $headers 
-
-$CurlCommand = @"
-curl -s https://idp.felleskomponent.no/nidp/oauth/nam/token ``
--u "somestring-off-text-with-stuff:longeruninterupetstringoftext" ``
--d grant_type=password ``
--d username="davidheim@client.mrfylke.no" ``
--d password="shouldhaveyourpasswordhere" ``
--d scope="fint-client"
-"@
-
-$Token = Invoke-Expression $CurlCommand | ConvertFrom-Json
-$AccessToken = $Token.access_token
-$headers = @{
-    Authorization = "Bearer $AccessToken"
-}
-'@
-            Write-Warning $string
+        #set all your credentials here
+        $grant_type = "password"
+        $client_id = "ID"
+        $client_secret = "Secret"
+        $username = "david@stuff.no"
+        $password = $null
+        $scope = "fint-client"
+        $idp_url = "https://idp.felleskomponent.no/nidp/oauth/nam/token"
+        #params for the token request.
+        $parameters = @{
+            uri    = $idp_url
+            Method = 'Post'
+            Body   = "grant_type=$grant_type&client_id=$client_id&client_secret=$client_secret&username=$username&password=$password&scope=$scope"
+        }     
+        #just to stop those who forget to paste in creds
+        if ($password -eq $null) {
+            Write-Warning "Password is blank. fill inn your api creds on line 44-50"
             break
         }
+    }
+    process {
+        if ($force) {
+            #create token
+            "Asking for token."
+            $Global:Token = invoke-restmethod @parameters
+            $global:TokenExpireTime = (get-date).AddSeconds(($Global:token).expires_in)
+            $Global:AccessToken = $global:Token.access_token
+        }
+        else {
+            if (-not$global:Token) {
+                "Cannot find Token. Asking for one now."
+                #create token
+                $Global:Token = invoke-restmethod @parameters
+                $global:TokenExpireTime = (get-date).AddSeconds(($Global:token).expires_in)
+                $Global:AccessToken = $global:Token.access_token
+            }
+            else {
+                #check if token is to old 
+                if (((get-date).AddMinutes(5)) -gt ($global:TokenExpireTime)) {
+                    "Token to old. Asking for a new one."
+                    #create token
+                    $Global:Token = invoke-restmethod @parameters
+                    #setting token expire time
+                    $global:TokenExpireTime = (get-date).AddSeconds(($Global:token).expires_in)
+                    $Global:AccessToken = $global:Token.access_token
+                }
+            }
+        }
+        # header for the request
+        $global:headers = @{
+            Authorization = "Bearer $Global:AccessToken"
+        }
+    }
+}
+function Get-SchoolDataList {
+    param (
+        # Default path is home folder for the user. 
+        [string]$path = "$home\Documents"
+    )
+    begin {
+        Get-FintToken -Force
         #testing for files
-        if (test-path "C:\UndervisningsgruppeXElev.csv") {
-            Write-Warning "C:\UndervisningsgruppeXElev.csv exists."
+        if (test-path "$path\UndervisningsgruppeXElev.csv") {
+            Write-Warning "$path\UndervisningsgruppeXElev.csv exists."
             $test = $true
         }
-        if (test-path "C:\skole.csv") {
-            Write-Warning "C:\skole.csv exists."
+        if (test-path "$path\skole.csv") {
+            Write-Warning "$path\skole.csv exists."
             $test = $true
         }
-        if (test-path "C:\laerer.csv") {
-            Write-Warning "C:\laerer.csv exists."
+        if (test-path "$path\laerer.csv") {
+            Write-Warning "$path\laerer.csv exists."
             $test = $true
         }
-        if (test-path "C:\Skoledataliste.xlsx") {
-            Write-Warning "C:\Skoledataliste.xlsx exists."
+        if (test-path "$path\Skoledataliste.xlsx") {
+            Write-Warning "$path\Skoledataliste.xlsx exists."
             $test = $true
         }
         if ($test) {
             "delete these files before you continue"
             Read-Host -Prompt "press Y and  enter to continue once you have deleted the files."
         }
-        
         # All API requests and hash table creations(for speed)
         "Getting Data"
+        $AlleElever = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/elev/elev/
+        $hashAlleElever = @{}
         $AlleElever._embedded._entries.foreach({ $hashAlleElever.add($_.systemid.identifikatorverdi, $_) })
         start-sleep -Seconds 3
         "1/8"
@@ -143,12 +169,10 @@ $headers = @{
         $AlleElevForhold = Invoke-RestMethod -Headers $headers -Uri https://api.felleskomponent.no/utdanning/elev/elevforhold/
         start-sleep -Seconds 3
         "8/8"
-
         # dont need these so commented out
         # $AlleAnsatte = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/administrasjon/personal/person
         # $AlleArbeidsforhold = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/administrasjon/personal/arbeidsforhold/
-
-
+        
         # creating an arraylist to store all stuff in.
         $UndervisningsgruppeXElevArrayList = New-Object -TypeName System.Collections.ArrayList
         $SkoleArrayList = New-Object -TypeName System.Collections.ArrayList
@@ -221,25 +245,24 @@ $headers = @{
                 $TeacherEmail = $TeacherPerson.kontaktinformasjon.epostadresse
                 [void]$LaererArrayList.add("$TeacherFirstName;$TeacherLastName;$TeacherSchoolName;$feidenavn;$TeacherEmail")
             })
-
-
         "Data processed. converting to object with headers."
+        # should proapply just have created psobject to begin with, if i feel like it i/someone feels like it i should run some performance tests and clean up some of this.
         $StudentPSobject = $UndervisningsgruppeXElevArrayList | ConvertFrom-Csv -Delimiter ";" -Header "skolenavn", "undervisningsgruppenavn", "undervisningsgruppebeskrivelse", "ElevFeideNavn", "Elevnummer", "ElevEtternavn", "ElevFornavn", "LærerFeideNavn"
         $SkolePSobject = $SkoleArrayList | ConvertFrom-Csv -Delimiter ";" -Header "Skolenavn", "Skolenummer", "Elevantall"
         $LaererPSobject = $LaererArrayList | ConvertFrom-Csv -Delimiter ";" -Header "Fornavn", "Etternavn", "Skole", "FeideID", "E-post"
         "Exporting to excel and CSV. following filenames"
-        "C:\UndervisningsgruppeXElev.csv"
-        "C:\skole.csv"
-        "C:\laerer.csv"
-        "C:\Skoledataliste.xlsx"
+        "$path\UndervisningsgruppeXElev.csv"
+        "$path\skole.csv"
+        "$path\laerer.csv"
+        "$path\Skoledataliste.xlsx"
         #CSV files
-        $StudentPSobject | Export-Csv -path C:\UndervisningsgruppeXElev.csv -force
-        $SkolePSobject | Export-Csv -Path C:\skole.csv -Force
-        $LaererPSobject | export-csv -Path c:\laerer.csv -Force
+        $StudentPSobject | Export-Csv -path $path\UndervisningsgruppeXElev.csv -force
+        $SkolePSobject | Export-Csv -Path $path\skole.csv -Force
+        $LaererPSobject | export-csv -Path $path\laerer.csv -Force
         # adding to excel
-        $StudentPSobject | Export-Excel -Path C:\Skoledataliste.xlsx -WorksheetName "UndervisningsgruppeXElev"
-        $SkolePSobject | Export-Excel -Path C:\Skoledataliste.xlsx -WorksheetName "Skole"
-        $LaererPSobject | Export-Excel -path C:\Skoledataliste.xlsx -WorksheetName "Laerer"
+        $StudentPSobject | Export-Excel -Path $path\Skoledataliste.xlsx -WorksheetName "UndervisningsgruppeXElev"
+        $SkolePSobject | Export-Excel -Path $path\Skoledataliste.xlsx -WorksheetName "Skole"
+        $LaererPSobject | Export-Excel -path $path\Skoledataliste.xlsx -WorksheetName "Laerer"
         "done"
     }
     end {
