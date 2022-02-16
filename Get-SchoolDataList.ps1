@@ -8,10 +8,13 @@
     all schools and the amount of students.
     .DESCRIPTION
     does 8 larger API requests. then localy matches instead of doing a gazillon api requests which would take a long time.
-    splitt into two functions
+    splitt into three functions
     Get-FintToken
     this function when run fills in $global:headers with an oauth token for use with api requests later on.
-    You should fill inn creds on line 45-50
+    You should fill inn creds on line 53-59
+
+    Invoke-FintApiRequest
+    gets all the data.
 
     Running Get-SchoolDataList does the stuff. 
 
@@ -25,6 +28,9 @@
     for another path, run "Get-SchoolDataList -path 'C:\Program Files\examplePath'" instead.
 
     the excel file contains the same info as the csv files split into each its own tab.
+    once everything is done it will do a cleanup of the temp files. Get-ChildItem $env:TEMP\Alle*.tmp | remove-item
+    if you have trouble with API stability or they just take to much time. you can remove the cleanup at the bottom of this file inside end
+    and also remove the -force part of "Invoke-FintApiRequest -force" in the beginning of Get-SchoolDataList
 
     .EXAMPLE
         Stores info in $home\documents
@@ -36,7 +42,7 @@
     .Notes
         FunctionName : Get-SchoolDataList
         Created by   : david.heim@mrfylke.no
-        Date         : 2022-11-02
+        Date         : 2022-02-09
         GitHub       : https://github.com/Trerot
 
         Feel free to ask about stuff.
@@ -100,93 +106,222 @@ function Get-FintToken {
         }
     }
 }
-function Get-SchoolDataList {
+function Invoke-FintApiRequest {
     param (
-        # Default path is home folder for the user. 
-        [string]$path = "$home\Documents"
+        [switch]$Force
     )
     begin {
-        Get-FintToken -Force
-        #testing for files
-        if (test-path "$path\UndervisningsgruppeXElev.csv") {
-            Write-Warning "$path\UndervisningsgruppeXElev.csv exists."
-            $test = $true
+        #getting oauth token. the function below fils the $global:headers which gets used further down.
+        Get-FintToken
+        # removing previousfiles if -force
+        if($Force){
+            Get-ChildItem $env:TEMP\Alle*.tmp | remove-item
         }
-        if (test-path "$path\skole.csv") {
-            Write-Warning "$path\skole.csv exists."
-            $test = $true
-        }
-        if (test-path "$path\laerer.csv") {
-            Write-Warning "$path\laerer.csv exists."
-            $test = $true
-        }
-        if (test-path "$path\Skoledataliste.xlsx") {
-            Write-Warning "$path\Skoledataliste.xlsx exists."
-            $test = $true
-        }
-        if ($test) {
-            "delete these files before you continue"
-            Read-Host -Prompt "press Y and  enter to continue once you have deleted the files."
-        }
-        # All API requests and hash table creations(for speed)
-        "Getting Data"
-        $AlleElever = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/elev/elev/
-        $hashAlleElever = @{}
-        $AlleElever._embedded._entries.foreach({ $hashAlleElever.add($_.systemid.identifikatorverdi, $_) })
-        start-sleep -Seconds 3
-        "1/8"
-        $AlleSkoler = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/utdanningsprogram/skole/
-        $HashAlleSkoler = @{}
-        $AlleSkoler._embedded._entries.foreach({ $HashAlleSkoler.add($_._links.self.href[1], $_) })
-        start-sleep -Seconds 3
-        "2/8"
-        $AlleElevPersoner = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/elev/person
-        $HashAlleElevPersoner = @{}
-        $AlleElevPersoner._embedded._entries.foreach({ $HashAlleElevPersoner.add($_._links.self.href, $_) })
-        start-sleep -Seconds 3
-        "3/8"
-        $alleundervisningsgrupper = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/timeplan/undervisningsgruppe
-        $HashAlleUndervisningsgrupper = @{}
-        $alleundervisningsgrupper._embedded._entries.foreach({ $HashAlleUndervisningsgrupper.add($_._links.self.href, $_) })
-        start-sleep -Seconds 3
-        "4/8"
-        $AlleUndervisningsForhold = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/elev/undervisningsforhold
-        $HashAlleUndervisningsForhold = @{}
-        $AlleUndervisningsForhold._embedded._entries.foreach({ $HashAlleUndervisningsForhold.add($_._links.self.href, $_) })
-        start-sleep -Seconds 3
-        "5/8"
-        $AlleSkoleRessurser = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/elev/skoleressurs
-        $HashAlleSkoleRessurser = @{}
-        $AlleSkoleRessurser._embedded._entries.foreach({ $HashAlleSkoleRessurser.add("https://api.felleskomponent.no/utdanning/elev/skoleressurs/systemid/$($_.systemid.identifikatorverdi)", $_) })
-        start-sleep -Seconds 3
-        "6/8"
-        $AlleFag = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/utdanning/timeplan/fag
-        $HashAlleFag = @{}
-        $AlleFag._embedded._entries.foreach({ $HashAlleFag.add($_._links.self.href, $_) })
-        start-sleep -Seconds 3
-        "7/8"
 
-        $AlleElevForhold = Invoke-RestMethod -Headers $headers -Uri https://api.felleskomponent.no/utdanning/elev/elevforhold/
-        start-sleep -Seconds 3
-        "8/8"
-        # dont need these so commented out
-        # $AlleAnsatte = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/administrasjon/personal/person
-        # $AlleArbeidsforhold = Invoke-RestMethod -Headers $headers -uri https://api.felleskomponent.no/administrasjon/personal/arbeidsforhold/
+        #  creating an array that works with parallelized workloads.
+        $Costs = [System.Collections.Concurrent.ConcurrentBag[psobject]]::new()
         
+        #list all links
+        $ListLinks = @(
+            [pscustomobject]@{
+                Name = 'AlleSkoler';
+                Uri  = 'https://api.felleskomponent.no/utdanning/utdanningsprogram/skole/'
+            }
+            [pscustomobject]@{
+                Name = 'AlleElever'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/elev/elev/'
+            }
+            [pscustomobject]@{
+                Name = 'AlleElevPersoner';
+                Uri  = 'https://api.felleskomponent.no/utdanning/elev/person'
+            }
+            [pscustomobject]@{
+                Name = 'AlleUndervisningsgrupper'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/timeplan/undervisningsgruppe'
+            }
+            [pscustomobject]@{
+                Name = 'AlleUndervisningsForhold';
+                Uri  = 'https://api.felleskomponent.no/utdanning/elev/undervisningsforhold'
+            }
+            [pscustomobject]@{
+                Name = 'AlleSkoleRessurser'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/elev/skoleressurs'
+            }
+            [pscustomobject]@{
+                Name = 'AlleFag';
+                Uri  = 'https://api.felleskomponent.no/utdanning/timeplan/fag'
+            }
+            [pscustomobject]@{
+                Name = 'AlleElevForhold'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/elev/elevforhold/'
+            }
+            [pscustomobject]@{
+                Name = 'AlleAnsatte';
+                Uri  = 'https://api.felleskomponent.no/administrasjon/personal/person'
+            }
+            [pscustomobject]@{
+                Name = 'AlleAnsattPersoner'; 
+                Uri  = 'https://api.felleskomponent.no/administrasjon/personal/personalressurs'
+            }
+            [pscustomobject]@{
+                Name = 'AlleArbeidsforhold';
+                Uri  = 'https://api.felleskomponent.no/administrasjon/personal/arbeidsforhold/'
+            }
+            [pscustomobject]@{
+                Name = 'AlleBasisGrupper'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/elev/basisgruppe'
+            }
+            [pscustomobject]@{
+                Name = 'AlleUtdanningsProgram'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/utdanningsprogram/utdanningsprogram'
+            }
+            [pscustomobject]@{
+                Name = 'AlleUtdanningsProgramOmrade'; 
+                Uri  = 'https://api.felleskomponent.no/utdanning/utdanningsprogram/programomrade'
+            }
+
+        ) 
+    }
+    process {
+        $ListLinks | ForEach-Object -ThrottleLimit 10 -Parallel {
+            $item = $_
+            #setting the filename for the item. 
+            $FileName = "$env:TEMP\$($item.name).tmp"
+
+            #creating an array and an object to add all filelocations to
+            $ItemObject = [pscustomobject]@{
+                Name     = "$($item.Name)"; 
+                Uri      = "$($item.Uri)"
+                FileName = $FileName
+            }
+            $fintfilearray = $using:costs
+            $fintfilearray.add($ItemObject)
+    
+            #testing if file exists or if date is older than 8 hours.
+            if (!(test-path $filename) -or (Get-ChildItem $FileName -ErrorAction SilentlyContinue).LastWriteTime -le (get-date).AddHours(-8) -or (Get-ChildItem -Path $filename -ErrorAction SilentlyContinue).Length -eq "0" ) {
+                try {
+                    #New-Item -Path $FileName -ItemType File -Force
+                    $countist = 0
+                    while ((get-childitem -path $filename -ErrorAction SilentlyContinue).length -eq "0") {
+                        $countist ++
+                        "try $countist for $filename"
+                        Invoke-RestMethod -Headers $using:headers -uri $($item.uri) -ErrorAction Stop -OutFile $FileName
+                    }
+                }
+                catch {
+                    $errormessage = ($error[0] | Select-Object *).Exception.Response.statuscode
+                    $autherror = "Unauthorized"
+                    $wronglink = "NotFound"
+                    $none = "none" # not sure if this is what it lookslike. status code is probably blank when i get non error.
+    
+                    switch ($errormessage) {
+                        $autherror { 
+                            Get-FintToken 
+                        }
+                        $wronglink {
+                            "link is wrong, fix it"
+                        }
+                        $none {
+                            start-sleep -Seconds 10
+                            # then try again after sleep.
+                        }
+                        Default { <#this should just try again #> }
+                    }
+                }
+            }
+        }
+        $Global:FintFileArray = $Costs
+    }
+}
+function Get-SchoolDataList {
+    [CmdletBinding()]
+    param (
+        
+    )
+    
+    begin {
+
+        Invoke-FintApiRequest -force
+        # import all the stuff into arrays. 
+        $Global:FintFileArray.foreach({
+                $FintFile = $_
+                $info = get-content -Path $FintFile.FileName | ConvertFrom-Json
+                $hashtable = @{}
+                $info._embedded._entries.foreach({
+                        $item = $_
+                        $key = $null
+                        # testing for systemid
+                        $key = ($item._links.self.href | select-string "systemid").line
+
+                        if ($null -eq $key  ) {
+                            # all the ones without system id
+                            $key = ($item._links.self.href | select-string "fodselsnummer").line
+                            if ($null -eq $key ) {
+                                $key = ($item._links.self.href | select-string "ansattnummer").line
+                                $hashtable.add($key, $item)
+                            }
+                            else {
+                                $hashtable.add($key, $item)
+                            }
+                        }
+                        else {
+                            $hashtable.add($key, $item)
+                        }          
+                    })
+
+                New-Variable -Name "$($FintFile.name)" -Value $info -Force
+                New-Variable -Name "Hash$($FintFile.name)" -Value $hashtable -Force
+            })
+        #arraylist to sort the students into 
+        $ElevInElevPersoner = New-Object -TypeName System.Collections.ArrayList
+        #arraylist for the donestuff
+        $DoneStuff = New-Object -TypeName System.Collections.ArrayList
+        $item = $null
         # creating an arraylist to store all stuff in.
         $UndervisningsgruppeXElevArrayList = New-Object -TypeName System.Collections.ArrayList
         $SkoleArrayList = New-Object -TypeName System.Collections.ArrayList
         $LaererArrayList = New-Object -TypeName System.Collections.ArrayList
     }
+    
     process {
         "Local processing data for UndervisningsgruppeXElev. Takes some minutes."
         $AlleElevForhold._embedded._entries.foreach({
+                $studentprogramomrade = $null
+                $utdanningstrinn = $null
+                $studentelevforhold = $null
+                $numFromProgramomrade = $null
+                $utdanningstrinn = $null
+                $programomrade = $null
+                $programnavn = $null
+                $basisgruppe = $null
+
                 $StudentClassesLink = $_._links.undervisningsgruppe
     
-                $studentsystemid = $_._links.elev.href -replace "https://api.felleskomponent.no/utdanning/elev/elev/systemid/"
+                $studentsystemid = $_._links.elev.href
                 # $StudentInfo = $AlleElever._embedded._entries.where({ $_._links.self[2].href -eq $StudentLink.href })
                 $studentinfo = $hashAlleElever.$studentsystemid
-    
+                # some students have multiple school relations. should get the one where hovedskole = true
+                if ($studentinfo._links.elevforhold.href.count -gt 1) {
+                    if ($HashAlleElevForhold.$($studentinfo._links.elevforhold.href[0]).hovedskole -eq $true ) {
+                        $studentelevforhold = $HashAlleElevForhold.$($studentinfo._links.elevforhold.href[0])
+                    }
+                    if ($HashAlleElevForhold.$($studentinfo._links.elevforhold.href[1]).hovedskole -eq $true ) {
+                        $studentelevforhold = $HashAlleElevForhold.$($studentinfo._links.elevforhold.href[1])
+                    }
+                }
+                else {
+                    $studentelevforhold = $HashAlleElevForhold.$($studentinfo._links.elevforhold.href)
+                }
+
+                $studentprogramomrade = $HashAlleUtdanningsProgramOmrade.$($studentelevforhold._links.programomrade.href)
+                $basisgruppe = $HashAlleBasisGrupper.$($studentelevforhold._links.basisgruppe.href)
+                
+                
+                $utdanningstrinn = $basisgruppe._links.trinn.href -replace '.*/'
+
+
+                $programomrade = $studentprogramomrade.beskrivelse
+                $programnavn = $studentprogramomrade.navn
                 $feidenavn = $studentinfo.feidenavn.identifikatorverdi
                 $elevnummer = $StudentInfo.elevnummer.identifikatorverdi
     
@@ -214,58 +349,30 @@ function Get-SchoolDataList {
                         $classname = $undervisningsgruppe.navn
                         # $classfullname = ($AlleFag._embedded._entries.where({ $_._links.self.href -eq $undervisningsgruppe._links.fag.href })).navn
                         $Fag = $hashallefag."$($undervisningsgruppe._links.fag.href)"
+                        $fagkode = $fag.systemid.identifikatorverdi
                         $classfullname = $Fag.navn
+
+                        #finding programmområde and 
+                        #$ProgramOmrade = $hashAlleUtdanningsProgramOmrade."$($fag._links.programomrade)"
     
     
                         # $schoolinfo = $alleskoler._embedded._entries.where({ $_._links.self[1].href -eq $undervisningsgruppe._links.skole.href })
                         $SchoolInfo = $HashAlleSkoler."$($undervisningsgruppe._links.skole.href)"
                         $SchoolName = $schoolinfo.navn
-    
-                        [void]$UndervisningsgruppeXElevArrayList.add("$schoolname;$classname;$classfullname;$feidenavn;$elevnummer;$elevetternavn;$elevfornavn;$teachername")
+                        #adding to list
+                        [void]$UndervisningsgruppeXElevArrayList.add("$schoolname;$classname;$classfullname;$feidenavn;$elevnummer;$elevetternavn;$elevfornavn;$teachername;$programomrade;$programnavn;$utdanningstrinn;$fagkode")
+                    
                     })
             })
-        "Done"
-        "Local processing data for Skole. should be almost instant"
-        foreach ($item in $AlleSkoler._embedded._entries) {
-            $SchoolName = $item.navn
-            $SchoolNumber = $item.skolenummer.identifikatorverdi
-            $SchoolStudentCount = ($item._links.elevforhold | measure-object).Count
-            [void]$SkoleArrayList.add("$SchoolName;$SchoolNumber;$SchoolStudentCount") 
-        }
-        "done"
-        "Local processing data for Laerer"
-        $AlleSkoleRessurser._embedded._entries.foreach({
-                $item = $_
-                $TeacherPerson = $HashAlleElevPersoner."$($item._links.person.href)"
-                $teacherSchool = $HashAlleSkoler."$($item._links.skole.href)"
-                $TeacherFirstName = "$($TeacherPerson.navn.fornavn)" + "$($TeacherPerson.navn.mellomnavn)"
-                $TeacherLastName = $TeacherPerson.navn.etternavn
-                $TeacherSchoolName = $teacherSchool.navn
-                $feidenavn = $item.feidenavn.identifikatorverdi
-                $TeacherEmail = $TeacherPerson.kontaktinformasjon.epostadresse
-                [void]$LaererArrayList.add("$TeacherFirstName;$TeacherLastName;$TeacherSchoolName;$feidenavn;$TeacherEmail")
-            })
-        "Data processed. converting to object with headers."
-        # should proapply just have created psobject to begin with, if i feel like it i/someone feels like it i should run some performance tests and clean up some of this.
-        $StudentPSobject = $UndervisningsgruppeXElevArrayList | ConvertFrom-Csv -Delimiter ";" -Header "skolenavn", "undervisningsgruppenavn", "undervisningsgruppebeskrivelse", "ElevFeideNavn", "Elevnummer", "ElevEtternavn", "ElevFornavn", "LærerFeideNavn"
-        $SkolePSobject = $SkoleArrayList | ConvertFrom-Csv -Delimiter ";" -Header "Skolenavn", "Skolenummer", "Elevantall"
-        $LaererPSobject = $LaererArrayList | ConvertFrom-Csv -Delimiter ";" -Header "Fornavn", "Etternavn", "Skole", "FeideID", "E-post"
-        "Exporting to excel and CSV. following filenames"
-        "$path\UndervisningsgruppeXElev.csv"
-        "$path\skole.csv"
-        "$path\laerer.csv"
-        "$path\Skoledataliste.xlsx"
-        #CSV files
-        $StudentPSobject | Export-Csv -path $path\UndervisningsgruppeXElev.csv -force
-        $SkolePSobject | Export-Csv -Path $path\skole.csv -Force
-        $LaererPSobject | export-csv -Path $path\laerer.csv -Force
-        # adding to excel
-        $StudentPSobject | Export-Excel -Path $path\Skoledataliste.xlsx -WorksheetName "UndervisningsgruppeXElev"
-        $SkolePSobject | Export-Excel -Path $path\Skoledataliste.xlsx -WorksheetName "Skole"
-        $LaererPSobject | Export-Excel -path $path\Skoledataliste.xlsx -WorksheetName "Laerer"
-        "done"
+
+        #export to excel here
+        $StudentPSobject = $UndervisningsgruppeXElevArrayList | ConvertFrom-Csv -Delimiter ";" -Header "skolenavn", "undervisningsgruppenavn", "undervisningsgruppebeskrivelse", "ElevFeideNavn", "Elevnummer", "ElevEtternavn", "ElevFornavn", "LærerFeideNavn", "Programområde", "programnavn", "utdanningstrinn", "Fagkode"
+        $date = (get-date).ToFileTime()
+        $StudentPSobject | Export-Excel -Path "$env:USERPROFILE\schooldatalist\Skoledatalist-$date.xlsx" -WorksheetName "UndervisningsgruppeXElev"
     }
+    
     end {
-        # nothing to do here realy as far as i can tell.
+        #cleaning up temp files
+        Get-ChildItem $env:TEMP\Alle*.tmp | remove-item
     }
 }
